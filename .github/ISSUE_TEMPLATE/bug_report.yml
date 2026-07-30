@@ -1,0 +1,58 @@
+name: Bug 报告
+description: 报告无法提取、提取错误或页面异常
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请勿提交 Cookie、Token、密码或未脱敏的私人链接。
+  - type: dropdown
+    id: content_type
+    attributes:
+      label: 作品类型
+      options:
+        - 视频
+        - 图文
+        - 不确定
+    validations:
+      required: true
+  - type: dropdown
+    id: link_type
+    attributes:
+      label: 链接类型
+      options:
+        - v.douyin.com 短链接
+        - www.douyin.com 完整链接
+        - 完整分享文本
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 例如 Windows 11 / Python 3.12
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为和错误信息
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issues
+          required: true
+        - label: 我已移除所有账号和敏感信息
+          required: true
