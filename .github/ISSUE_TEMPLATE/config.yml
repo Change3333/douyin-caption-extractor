@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题
+    url: https://github.com/Change3333/douyin-caption-extractor/security
+    about: 请通过 Security 页面私密报告漏洞，不要创建公开 Issue。
