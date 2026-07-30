@@ -132,5 +132,67 @@ class ApiSecurityTest(unittest.TestCase):
         self.assertEqual(response.status_code, 429)
 
 
+class DiscoveryMetadataTest(unittest.TestCase):
+    def setUp(self):
+        self.client = douyin_desc.app.test_client()
+
+    def test_homepage_exposes_search_and_social_metadata(self):
+        response = self.client.get(
+            "/",
+            base_url="http://caption.example",
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        page = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            '<link rel="canonical" href="https://caption.example/">',
+            page,
+        )
+        self.assertIn('<meta property="og:type" content="website">', page)
+        self.assertIn(
+            '<meta property="og:url" content="https://caption.example/">',
+            page,
+        )
+        self.assertIn(
+            f'<meta property="og:image" content="{douyin_desc.SOCIAL_IMAGE_URL}">',
+            page,
+        )
+        self.assertIn(
+            '<meta name="twitter:card" content="summary_large_image">',
+            page,
+        )
+
+    def test_robots_allows_homepage_and_disallows_api(self):
+        response = self.client.get(
+            "/robots.txt",
+            base_url="http://caption.example",
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        content = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "text/plain")
+        self.assertIn("Allow: /", content)
+        self.assertIn("Disallow: /api/", content)
+        self.assertIn(
+            "Sitemap: https://caption.example/sitemap.xml",
+            content,
+        )
+
+    def test_sitemap_contains_only_public_homepage(self):
+        response = self.client.get(
+            "/sitemap.xml",
+            base_url="http://caption.example",
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        content = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/xml")
+        self.assertIn("<loc>https://caption.example/</loc>", content)
+        self.assertNotIn("/api/", content)
+
+
 if __name__ == "__main__":
     unittest.main()

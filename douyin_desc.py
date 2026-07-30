@@ -1,9 +1,10 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, Response, request, jsonify, render_template_string
 import re
 import json
 import requests
 from threading import BoundedSemaphore
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
+from xml.sax.saxutils import escape as xml_escape
 from playwright.sync_api import sync_playwright, TimeoutError
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -14,6 +15,19 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 MAX_SHARE_TEXT_LENGTH = 4096
 ALLOWED_DOUYIN_HOST = "douyin.com"
 BROWSER_SEMAPHORE = BoundedSemaphore(value=1)
+SITE_DESCRIPTION = "粘贴抖音视频或图文分享链接，一键提取并复制作品描述文案。"
+SOCIAL_IMAGE_URL = (
+    "https://raw.githubusercontent.com/Change3333/"
+    "douyin-caption-extractor/main/assets/hero-v2.png"
+)
+
+
+def get_public_root_url():
+    """根据可信反向代理提供的协议头生成当前站点根地址。"""
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
+    forwarded_proto = forwarded_proto.split(",", 1)[0].strip().lower()
+    scheme = forwarded_proto if forwarded_proto in {"http", "https"} else request.scheme
+    return request.url_root.replace(f"{request.scheme}://", f"{scheme}://", 1)
 
 
 @app.after_request
@@ -47,6 +61,21 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="description" content="{{ site_description }}">
+    <link rel="canonical" href="{{ canonical_url }}">
+    <meta property="og:type" content="website">
+    <meta property="og:locale" content="zh_CN">
+    <meta property="og:site_name" content="抖音图文文案提取器">
+    <meta property="og:title" content="抖音图文文案提取器">
+    <meta property="og:description" content="{{ site_description }}">
+    <meta property="og:url" content="{{ canonical_url }}">
+    <meta property="og:image" content="{{ social_image_url }}">
+    <meta property="og:image:width" content="1774">
+    <meta property="og:image:height" content="887">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="抖音图文文案提取器">
+    <meta name="twitter:description" content="{{ site_description }}">
+    <meta name="twitter:image" content="{{ social_image_url }}">
     <title>抖音图文文案提取器</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -833,7 +862,42 @@ def perform_extraction(share_text):
 @app.route('/')
 def index():
     """返回前端 HTML 页面"""
-    return render_template_string(HTML_TEMPLATE)
+    return render_template_string(
+        HTML_TEMPLATE,
+        canonical_url=get_public_root_url(),
+        site_description=SITE_DESCRIPTION,
+        social_image_url=SOCIAL_IMAGE_URL,
+    )
+
+
+@app.route('/robots.txt')
+def robots_txt():
+    """允许抓取首页，同时明确排除 API 端点。"""
+    sitemap_url = urljoin(get_public_root_url(), "sitemap.xml")
+    content = (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Disallow: /api/\n"
+        f"Sitemap: {sitemap_url}\n"
+    )
+    return Response(content, mimetype="text/plain")
+
+
+@app.route('/sitemap.xml')
+def sitemap_xml():
+    """为搜索引擎提供只有公开首页的最小站点地图。"""
+    canonical_url = xml_escape(get_public_root_url())
+    content = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        "  <url>\n"
+        f"    <loc>{canonical_url}</loc>\n"
+        "    <changefreq>weekly</changefreq>\n"
+        "    <priority>1.0</priority>\n"
+        "  </url>\n"
+        "</urlset>\n"
+    )
+    return Response(content, mimetype="application/xml")
 
 @app.route('/api/extract', methods=['POST'])
 def api_extract():
