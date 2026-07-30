@@ -5,6 +5,10 @@
 <h1 align="center">抖音图文文案提取器</h1>
 
 <p align="center">
+  简体中文 · <a href="README_EN.md">English</a>
+</p>
+
+<p align="center">
   粘贴抖音视频或图文分享链接，一键提取并复制作品描述文案。<br>
   Paste a Douyin share link, extract the post description, and copy it instantly.
 </p>
