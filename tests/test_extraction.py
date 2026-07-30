@@ -8,6 +8,7 @@ class GarbageFilteringTest(unittest.TestCase):
     def test_rejects_exact_page_placeholders(self):
         for text in (
             "加载中",
+            "页面加载中",
             "抖音",
             "原创音乐",
             "网络错误，请点击重试",

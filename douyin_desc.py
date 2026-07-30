@@ -245,6 +245,7 @@ def find_all_descs(data, descs):
 
 GARBAGE_EXACT_TEXTS = {
     "加载中",
+    "页面加载中",
     "读屏标签已关闭",
     "抖音",
     "点击重试",
