@@ -2,9 +2,16 @@ from flask import Flask, request, jsonify, render_template_string
 import re
 import json
 import requests
+from threading import BoundedSemaphore
+from urllib.parse import unquote, urljoin, urlparse
 from playwright.sync_api import sync_playwright, TimeoutError
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
+
+MAX_SHARE_TEXT_LENGTH = 4096
+ALLOWED_DOUYIN_HOST = "douyin.com"
+BROWSER_SEMAPHORE = BoundedSemaphore(value=1)
 
 # 极简移动端自适应前端模板 (Tailwind CSS)
 HTML_TEMPLATE = """
@@ -231,19 +238,62 @@ def get_longest_desc(data):
         return None
     return max(descs, key=len)
 
+
+def is_allowed_douyin_url(url):
+    """只允许 http(s) 的 douyin.com 及其子域名，防止服务被用作 SSRF 跳板。"""
+    if not isinstance(url, str) or not url:
+        return False
+
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+
+    return (
+        parsed.scheme.lower() in {"http", "https"}
+        and (
+            hostname == ALLOWED_DOUYIN_HOST
+            or hostname.endswith(f".{ALLOWED_DOUYIN_HOST}")
+        )
+    )
+
+
+def extract_douyin_url(share_text):
+    """从分享文本中提取并规范化第一个合法抖音链接。"""
+    if not isinstance(share_text, str):
+        return None
+
+    text = share_text.strip()
+    if not text or len(text) > MAX_SHARE_TEXT_LENGTH:
+        return None
+
+    trailing_punctuation = ".,!?;:）》】}]'\""
+    for match in re.finditer(
+        r"https?://[^\s<>\"'，。！？；：、）》】}]+",
+        text,
+        re.IGNORECASE,
+    ):
+        candidate = match.group(0).rstrip(trailing_punctuation)
+        if is_allowed_douyin_url(candidate):
+            return candidate
+
+    return None
+
+
+def should_block_navigation(url, is_navigation_request, is_main_frame):
+    """仅限制主页面跳转；图片、脚本等跨域静态资源仍可正常加载。"""
+    return is_navigation_request and is_main_frame and not is_allowed_douyin_url(url)
+
+
 def perform_extraction(share_text):
     """核心提取逻辑 (Playwright 网络拦截)"""
-    url_match = re.search(r'(https?://v\.douyin\.com/[a-zA-Z0-9]+/?)', share_text)
-    if not url_match:
-        url_match = re.search(r'(https?://[^\s]+)', share_text)
-
-    if not url_match:
-        return {"status": "error", "message": "未在输入中找到有效的网址链接。"}
-
-    url = url_match.group(1)
+    url = extract_douyin_url(share_text)
+    if not url:
+        return {"status": "error", "message": "未找到有效的抖音链接。"}
 
     # ---------------- 预解析短链：移动端伪装 + 多重拦截 ----------------
-    if 'v.douyin.com' in url:
+    if (urlparse(url).hostname or "").lower() == "v.douyin.com":
         try:
             mobile_headers = {
                 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
@@ -257,7 +307,10 @@ def perform_extraction(share_text):
 
             # 优先检查 301/302/307 的 Location 响应头
             if res.status_code in (301, 302, 307, 308) and 'Location' in res.headers:
-                url = res.headers['Location']
+                redirect_url = urljoin(url, res.headers['Location'])
+                if not is_allowed_douyin_url(redirect_url):
+                    return {"status": "error", "message": "短链跳转到了不受信任的地址。"}
+                url = redirect_url
             else:
                 # JS 兜底解析：从 200 响应体中暴力提取隐藏的真实跳转链接
                 real_url = None
@@ -271,7 +324,6 @@ def perform_extraction(share_text):
                 if not real_url:
                     m = re.search(r'url[=:]\s*["\']?(https?%3A%2F%2F[^"\'&\s]+)', text, re.IGNORECASE)
                     if m:
-                        from urllib.parse import unquote
                         real_url = unquote(m.group(1))
                 # 模式3: window.location / location.href 赋值
                 if not real_url:
@@ -284,8 +336,13 @@ def perform_extraction(share_text):
                     if m:
                         real_url = m.group(1)
 
-                if real_url and ('douyin.com' in real_url):
-                    url = real_url
+                if real_url:
+                    candidate_url = urljoin(url, real_url)
+                else:
+                    candidate_url = None
+
+                if candidate_url and is_allowed_douyin_url(candidate_url):
+                    url = candidate_url
                 else:
                     return {"status": "error", "message": "短链解析被风控拦截，请手动在浏览器打开复制长链接后重试。"}
         except Exception:
@@ -297,6 +354,9 @@ def perform_extraction(share_text):
     if modal_match:
         url = f"https://www.douyin.com/note/{modal_match.group(1)}"
     # -----------------------------------------------------------------
+
+    if not is_allowed_douyin_url(url):
+        return {"status": "error", "message": "拒绝访问不受信任的地址。"}
 
     # 使用字典来保存状态，避免在多线程请求中产生全局变量污染
     ext_state = {"desc": None}
@@ -332,6 +392,18 @@ def perform_extraction(share_text):
             )
             page = context.new_page()
 
+            def guard_main_frame_navigation(route, browser_request):
+                if should_block_navigation(
+                    browser_request.url,
+                    browser_request.is_navigation_request(),
+                    browser_request.frame == page.main_frame,
+                ):
+                    route.abort()
+                else:
+                    route.continue_()
+
+            page.route("**/*", guard_main_frame_navigation)
+
             # 额外清除 webdriver 属性标志
             page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
@@ -353,7 +425,6 @@ def perform_extraction(share_text):
 
             # ========== SSR 源代码正则提取（核心杀招）==========
             try:
-                from urllib.parse import unquote
                 html = page.content()
 
                 # 路径1: <script id="RENDER_DATA" type="application/json"> (URL 编码的 JSON)
@@ -528,13 +599,41 @@ def index():
 @app.route('/api/extract', methods=['POST'])
 def api_extract():
     """处理前端发来的提取请求"""
-    data = request.get_json()
-    if not data or 'url' not in data:
-        return jsonify({"status": "error", "message": "请求格式错误，缺少 url 字段"})
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or 'url' not in data:
+        return jsonify({"status": "error", "message": "请求格式错误，缺少 url 字段"}), 400
 
     share_text = data['url']
-    result = perform_extraction(share_text)
-    return jsonify(result)
+    if not isinstance(share_text, str):
+        return jsonify({"status": "error", "message": "url 字段必须是字符串"}), 400
+
+    if not share_text.strip():
+        return jsonify({"status": "error", "message": "请输入抖音分享文本或链接"}), 400
+
+    if len(share_text) > MAX_SHARE_TEXT_LENGTH:
+        return jsonify({"status": "error", "message": "输入内容过长"}), 400
+
+    if not extract_douyin_url(share_text):
+        return jsonify({"status": "error", "message": "请输入有效的抖音链接"}), 400
+
+    if not BROWSER_SEMAPHORE.acquire(blocking=False):
+        return jsonify({
+            "status": "error",
+            "message": "服务正在处理其他请求，请稍后重试",
+        }), 429
+
+    try:
+        result = perform_extraction(share_text)
+        status_code = 200 if result.get("status") == "success" else 422
+        return jsonify(result), status_code
+    finally:
+        BROWSER_SEMAPHORE.release()
+
+
+@app.errorhandler(413)
+def request_entity_too_large(_error):
+    """返回 JSON，避免前端把过大的请求误判为网络故障。"""
+    return jsonify({"status": "error", "message": "请求内容过大"}), 413
 
 if __name__ == '__main__':
     print("=" * 50)
