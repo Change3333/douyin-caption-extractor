@@ -3,8 +3,10 @@ import re
 import json
 import requests
 from threading import BoundedSemaphore
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from playwright.sync_api import sync_playwright, TimeoutError
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
@@ -241,17 +243,219 @@ def find_all_descs(data, descs):
         for item in data:
             find_all_descs(item, descs)
 
-GARBAGE_TEXTS = {"加载中", "读屏标签已关闭", "抖音", "点击重试", "网络错误", "抖音短视频", "记录美好生活", "原创音乐"}
+GARBAGE_EXACT_TEXTS = {
+    "加载中",
+    "读屏标签已关闭",
+    "抖音",
+    "点击重试",
+    "网络错误",
+    "网络错误，请点击重试",
+    "网络错误 点击重试",
+    "抖音短视频",
+    "记录美好生活",
+    "抖音 - 记录美好生活",
+    "抖音-记录美好生活",
+    "抖音，记录美好生活",
+    "原创音乐",
+}
+
+DESC_PRIORITIES = {
+    "title": 10,
+    "dom_fallback": 20,
+    "json_fallback": 50,
+    "meta": 60,
+    "dom_selector": 70,
+    "json_detail": 80,
+    "json_target": 100,
+}
+
+ITEM_ID_KEYS = ("aweme_id", "item_id", "awemeId", "itemId", "id")
+DETAIL_CONTAINER_KEYS = (
+    "aweme_detail",
+    "awemeDetail",
+    "item_detail",
+    "itemDetail",
+)
+ITEM_COLLECTION_KEYS = (
+    "aweme_list",
+    "awemeList",
+    "item_list",
+    "itemList",
+)
 
 def is_garbage(text):
-    """检查文本是否为垃圾占位符（精确匹配或包含黑名单关键词）"""
-    if not text:
+    """过滤页面占位符，但不误杀包含“抖音”等词的正常作品文案。"""
+    if not isinstance(text, str) or not text.strip():
         return True
+
     t = text.strip()
-    for g in GARBAGE_TEXTS:
-        if g in t:
-            return True
+    return t in GARBAGE_EXACT_TEXTS
+
+
+def clean_desc_text(text):
+    """清理多余空白，同时保留作品文案中的段落换行。"""
+    if not isinstance(text, str):
+        return ""
+
+    normalized = text.replace("\\/", "/").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t\f\v]+", " ", line).strip() for line in normalized.split("\n")]
+
+    cleaned_lines = []
+    previous_was_blank = False
+    for line in lines:
+        if line:
+            cleaned_lines.append(line)
+            previous_was_blank = False
+        elif cleaned_lines and not previous_was_blank:
+            cleaned_lines.append("")
+            previous_was_blank = True
+
+    return "\n".join(cleaned_lines).strip()
+
+
+def extract_item_id(url):
+    """从视频、图文路径或常见查询参数中提取作品 ID。"""
+    if not is_allowed_douyin_url(url):
+        return None
+
+    parsed = urlparse(url)
+    path_match = re.search(r"/(?:video|note)/(\d+)", parsed.path)
+    if path_match:
+        return path_match.group(1)
+
+    query = parse_qs(parsed.query)
+    for key in ("modal_id", "aweme_id", "item_id"):
+        values = query.get(key)
+        if values and values[0].isdigit():
+            return values[0]
+
+    return None
+
+
+def find_desc_for_item(data, item_id):
+    """递归查找 ID 与目标作品一致的直接 desc 字段。"""
+    if not item_id:
+        return None
+
+    if isinstance(data, dict):
+        ids = {
+            str(data[key])
+            for key in ITEM_ID_KEYS
+            if data.get(key) is not None
+        }
+        desc = data.get("desc")
+        if item_id in ids and isinstance(desc, str) and not is_garbage(desc):
+            return clean_desc_text(desc)
+
+        for value in data.values():
+            found = find_desc_for_item(value, item_id)
+            if found:
+                return found
+    elif isinstance(data, list):
+        for item in data:
+            found = find_desc_for_item(item, item_id)
+            if found:
+                return found
+
+    return None
+
+
+def find_primary_desc(data, inside_primary_container=False):
+    """优先查找 aweme_detail、item_detail 等作品主体容器中的文案。"""
+    if isinstance(data, dict):
+        desc = data.get("desc")
+        if (
+            inside_primary_container
+            and isinstance(desc, str)
+            and not is_garbage(desc)
+        ):
+            return clean_desc_text(desc)
+
+        for key in DETAIL_CONTAINER_KEYS + ITEM_COLLECTION_KEYS:
+            if key in data:
+                found = find_primary_desc(data[key], inside_primary_container=True)
+                if found:
+                    return found
+
+        for key, value in data.items():
+            if key not in DETAIL_CONTAINER_KEYS + ITEM_COLLECTION_KEYS:
+                found = find_primary_desc(value, inside_primary_container=False)
+                if found:
+                    return found
+    elif isinstance(data, list):
+        for item in data:
+            found = find_primary_desc(item, inside_primary_container)
+            if found:
+                return found
+
+    return None
+
+
+def get_best_desc(data, item_id=None):
+    """按目标 ID、作品主体、通用兜底的顺序选择文案与可信度。"""
+    targeted = find_desc_for_item(data, item_id)
+    if targeted:
+        return targeted, DESC_PRIORITIES["json_target"]
+
+    primary = find_primary_desc(data)
+    if primary:
+        return primary, DESC_PRIORITIES["json_detail"]
+
+    fallback = get_longest_desc(data)
+    if fallback:
+        return clean_desc_text(fallback), DESC_PRIORITIES["json_fallback"]
+
+    return None, -1
+
+
+def consider_desc(state, text, priority):
+    """仅让更可信的候选覆盖当前文案；同级时选择信息更完整的文本。"""
+    candidate = clean_desc_text(text)
+    if not candidate or is_garbage(candidate):
+        return False
+
+    current = state.get("desc")
+    current_priority = state.get("priority", -1)
+    if (
+        not current
+        or priority > current_priority
+        or (priority == current_priority and len(candidate) > len(current))
+    ):
+        state["desc"] = candidate
+        state["priority"] = priority
+        return True
+
     return False
+
+
+def fetch_short_link(url, headers):
+    """为短链连接抖动和服务端 5xx 提供有限重试，不重试风控 429。"""
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        status=2,
+        backoff_factor=0.4,
+        status_forcelist=(500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+        respect_retry_after_header=True,
+    )
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+    try:
+        return session.get(
+            url,
+            headers=headers,
+            allow_redirects=False,
+            timeout=(5, 10),
+        )
+    finally:
+        session.close()
+
 
 def get_longest_desc(data):
     """返回列表中最长的 desc，自动过滤垃圾文本"""
@@ -328,7 +532,7 @@ def perform_extraction(share_text):
                 'Connection': 'keep-alive',
                 'Cache-Control': 'no-cache',
             }
-            res = requests.get(url, headers=mobile_headers, allow_redirects=False, timeout=10)
+            res = fetch_short_link(url, mobile_headers)
 
             # 优先检查 301/302/307 的 Location 响应头
             if res.status_code in (301, 302, 307, 308) and 'Location' in res.headers:
@@ -383,8 +587,10 @@ def perform_extraction(share_text):
     if not is_allowed_douyin_url(url):
         return {"status": "error", "message": "拒绝访问不受信任的地址。"}
 
+    target_item_id = extract_item_id(url)
+
     # 使用字典来保存状态，避免在多线程请求中产生全局变量污染
-    ext_state = {"desc": None}
+    ext_state = {"desc": None, "priority": -1}
 
     def handle_response(response):
         try:
@@ -392,11 +598,8 @@ def perform_extraction(share_text):
                 req_url = response.url
                 if "detail" in req_url or "aweme" in req_url or "item" in req_url:
                     json_data = response.json()
-                    longest_desc = get_longest_desc(json_data)
-
-                    if longest_desc and not is_garbage(longest_desc):
-                        if not ext_state["desc"] or len(longest_desc) > len(ext_state["desc"]):
-                            ext_state["desc"] = longest_desc
+                    candidate, priority = get_best_desc(json_data, target_item_id)
+                    consider_desc(ext_state, candidate, priority)
         except Exception:
             pass
 
@@ -458,10 +661,8 @@ def perform_extraction(share_text):
                     try:
                         decoded = unquote(m.group(1).strip())
                         data = json.loads(decoded)
-                        ssr_desc = get_longest_desc(data)
-                        if ssr_desc and not is_garbage(ssr_desc):
-                            if not ext_state["desc"] or len(ssr_desc) > len(ext_state["desc"]):
-                                ext_state["desc"] = ssr_desc
+                        candidate, priority = get_best_desc(data, target_item_id)
+                        consider_desc(ext_state, candidate, priority)
                     except Exception:
                         pass
 
@@ -495,10 +696,11 @@ def perform_extraction(share_text):
                                     json_str = html[start:i+1]
                                     try:
                                         data = json.loads(json_str)
-                                        ssr_desc = get_longest_desc(data)
-                                        if ssr_desc and not is_garbage(ssr_desc):
-                                            if not ext_state["desc"] or len(ssr_desc) > len(ext_state["desc"]):
-                                                ext_state["desc"] = ssr_desc
+                                        candidate, priority = get_best_desc(
+                                            data,
+                                            target_item_id,
+                                        )
+                                        consider_desc(ext_state, candidate, priority)
                                     except Exception:
                                         pass
                                     break
@@ -507,6 +709,7 @@ def perform_extraction(share_text):
 
             # ========== DOM 视觉提取（三层递进，最高优先级）==========
             dom_desc = None
+            dom_priority = DESC_PRIORITIES["dom_fallback"]
             raw = page.evaluate("""() => {
                 // ---- Tier 1: 扩大选择器阵列（移动端 + PC 端「抖音精选」+ 图文）----
                 const selectors = [
@@ -542,7 +745,7 @@ def perform_extraction(share_text):
                     try {
                         const el = document.querySelector(sel);
                         if (el && el.textContent.trim().length > 0) {
-                            return el.textContent;
+                            return {text: el.textContent, source: 'selector'};
                         }
                     } catch(e) {}
                 }
@@ -550,7 +753,7 @@ def perform_extraction(share_text):
                 // ---- Tier 2: Meta 保底 ----
                 const meta = document.querySelector("meta[name='description']");
                 if (meta && meta.content.trim()) {
-                    return meta.content;
+                    return {text: meta.content, source: 'meta'};
                 }
 
                 // ---- Tier 3: 终极暴力保底 — 遍历所有可见文本节点，返回最长的那一个 ----
@@ -574,15 +777,22 @@ def perform_extraction(share_text):
                     const t = node.textContent.trim();
                     if (t.length > best.length) best = t;
                 }
-                return best;
+                return {text: best, source: 'fallback'};
             }""")
-            if raw and raw.strip():
-                dom_desc = ' '.join(raw.split())
+            if isinstance(raw, dict):
+                dom_desc = clean_desc_text(raw.get("text"))
+                source = raw.get("source")
+                dom_priority = {
+                    "selector": DESC_PRIORITIES["dom_selector"],
+                    "meta": DESC_PRIORITIES["meta"],
+                    "fallback": DESC_PRIORITIES["dom_fallback"],
+                }.get(source, DESC_PRIORITIES["dom_fallback"])
+            elif isinstance(raw, str):
+                # 兼容旧返回格式，避免页面脚本变更时直接丢失 DOM 兜底。
+                dom_desc = clean_desc_text(raw)
+                dom_priority = DESC_PRIORITIES["dom_fallback"]
 
-            # 谁长用谁：DOM 文本更长则覆盖抓包结果
-            if dom_desc and not is_garbage(dom_desc):
-                if not ext_state["desc"] or len(dom_desc) > len(ext_state["desc"]):
-                    ext_state["desc"] = dom_desc
+            consider_desc(ext_state, dom_desc, dom_priority)
 
             # ========== 兜底：标题提取 ==========
             if not ext_state["desc"] or len(ext_state["desc"].strip()) == 0:
@@ -597,13 +807,16 @@ def perform_extraction(share_text):
                         title_desc = title.replace("- 抖音", "").strip()
                     elif title != "抖音":
                         title_desc = title.strip()
-                    if title_desc and not is_garbage(title_desc):
-                        ext_state["desc"] = title_desc
+                    consider_desc(
+                        ext_state,
+                        title_desc,
+                        DESC_PRIORITIES["title"],
+                    )
 
             browser.close()
 
         if ext_state["desc"]:
-            clean_desc = ext_state["desc"].replace('\\/', '/').strip()
+            clean_desc = clean_desc_text(ext_state["desc"])
             return {"status": "success", "desc": clean_desc}
         else:
             return {"status": "error", "message": "未能成功提取到文案。页面可能需要登录验证或遇到了强风控。"}
