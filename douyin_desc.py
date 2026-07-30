@@ -13,6 +13,31 @@ MAX_SHARE_TEXT_LENGTH = 4096
 ALLOWED_DOUYIN_HOST = "douyin.com"
 BROWSER_SEMAPHORE = BoundedSemaphore(value=1)
 
+
+@app.after_request
+def add_security_headers(response):
+    """为页面和 API 响应添加不依赖反向代理的基础安全头。"""
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()",
+    )
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'",
+    )
+    return response
+
+
 # 极简移动端自适应前端模板 (Tailwind CSS)
 HTML_TEMPLATE = """
 <!DOCTYPE html>

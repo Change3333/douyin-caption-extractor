@@ -71,6 +71,21 @@ class ApiSecurityTest(unittest.TestCase):
     def setUp(self):
         self.client = douyin_desc.app.test_client()
 
+    def test_adds_security_headers(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+        self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
+        self.assertEqual(
+            response.headers["Permissions-Policy"],
+            "camera=(), microphone=(), geolocation=()",
+        )
+        self.assertIn(
+            "frame-ancestors 'none'",
+            response.headers["Content-Security-Policy"],
+        )
+
     def test_rejects_invalid_json(self):
         response = self.client.post(
             "/api/extract",
