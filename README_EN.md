@@ -12,8 +12,13 @@
   Paste a Douyin video or photo-post share link, extract the publisher-written description, and copy it in one click.
 </p>
 
+> [!TIP]
+> **No installation required:** [Open the live HTTPS demo](https://change333.dpdns.org/). The public demo is intended for personal, low-concurrency use.
+
 > [!NOTE]
 > This project extracts the text description entered by the post publisher. It does not transcribe speech, perform OCR, or download the video.
+
+If this project saves you time, consider giving it a **Star** so more people can discover it.
 
 ## Features
 

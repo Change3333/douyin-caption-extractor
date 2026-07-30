@@ -13,6 +13,9 @@
   Paste a Douyin share link, extract the post description, and copy it instantly.
 </p>
 
+> [!TIP]
+> **无需安装：** [打开 HTTPS 在线体验](https://change333.dpdns.org/)。在线演示面向个人和低并发试用。
+
 <p align="center">
   <a href="https://github.com/Change3333/douyin-caption-extractor/actions/workflows/ci.yml"><img src="https://github.com/Change3333/douyin-caption-extractor/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+"></a>
