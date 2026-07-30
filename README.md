@@ -33,6 +33,14 @@
 - **可靠复制**：兼容 HTTPS、localhost 和局域网 HTTP
 - **单文件部署**：核心应用集中在 `douyin_desc.py`
 
+## 界面预览
+
+<p align="center">
+  <img src="assets/demo-ui.png" alt="抖音图文文案提取器提取结果界面" width="720">
+</p>
+
+输入完整分享文本或链接后，提取结果会保留换行，并可通过右上角按钮一键复制。
+
 ## 工作流程
 
 ```mermaid

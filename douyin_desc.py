@@ -13,7 +13,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>抖音文案提取器</title>
+    <title>抖音图文文案提取器</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         .spinner {
@@ -31,8 +31,8 @@ HTML_TEMPLATE = """
 
     <div class="w-full max-w-lg bg-white rounded-2xl shadow-xl overflow-hidden">
         <div class="bg-black text-white p-5 text-center">
-            <h1 class="text-2xl font-bold tracking-wider">文案提取工具</h1>
-            <p class="text-sm text-gray-300 mt-1 opacity-80">支持长文案/图文百分百无损提取</p>
+            <h1 class="text-2xl font-bold tracking-wider">抖音图文文案提取器</h1>
+            <p class="text-sm text-gray-300 mt-1 opacity-80">视频 / 图文作品描述一键提取</p>
         </div>
 
         <div class="p-6 space-y-6">
